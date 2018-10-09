@@ -57,7 +57,7 @@ class CoreDocumentSynchronizationConfig {
   private final ReadWriteLock docLock;
   private ChangeEvent<BsonDocument> lastUncommittedChangeEvent;
   private long lastResolution;
-  private BsonValue lastKnownRemoteVersion;
+  private BsonDocument lastKnownRemoteVersion;
   private boolean isStale;
 
   // TODO: How can this be trimmed? The same version could appear after we see it once. That
@@ -102,7 +102,7 @@ class CoreDocumentSynchronizationConfig {
       final BsonValue documentId,
       final ChangeEvent<BsonDocument> lastUncommittedChangeEvent,
       final long lastResolution,
-      final BsonValue lastVersion,
+      final BsonDocument lastVersion,
       final Set<BsonValue> committedVersions,
       final boolean isStale
   ) {
@@ -190,7 +190,7 @@ class CoreDocumentSynchronizationConfig {
    */
   void setSomePendingWrites(
       final long atTime,
-      final BsonValue atVersion,
+      final BsonDocument atVersion,
       final ChangeEvent<BsonDocument> changeEvent
   ) {
     docLock.writeLock().lock();
@@ -210,7 +210,7 @@ class CoreDocumentSynchronizationConfig {
     }
   }
 
-  void setPendingWritesComplete(final BsonValue atVersion) {
+  void setPendingWritesComplete(final BsonDocument atVersion) {
     docLock.writeLock().lock();
     try {
       this.lastUncommittedChangeEvent = null;
@@ -301,7 +301,7 @@ class CoreDocumentSynchronizationConfig {
     }
   }
 
-  public BsonValue getLastKnownRemoteVersion() {
+  public BsonDocument getLastKnownRemoteVersion() {
     docLock.readLock().lock();
     try {
       return lastKnownRemoteVersion;
@@ -432,9 +432,9 @@ class CoreDocumentSynchronizationConfig {
     final BsonArray committedVersionsArr = document.getArray(ConfigCodec.Fields.COMMITTED_VERSIONS);
     final Set<BsonValue> committedVersions = new HashSet<>(committedVersionsArr);
 
-    final BsonValue lastVersion;
+    final BsonDocument lastVersion;
     if (document.containsKey(ConfigCodec.Fields.LAST_KNOWN_REMOTE_VERSION_FIELD)) {
-      lastVersion = document.get(ConfigCodec.Fields.LAST_KNOWN_REMOTE_VERSION_FIELD);
+      lastVersion = document.getDocument(ConfigCodec.Fields.LAST_KNOWN_REMOTE_VERSION_FIELD);
     } else {
       lastVersion = null;
     }
