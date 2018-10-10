@@ -71,6 +71,7 @@ import org.bson.Document;
 import org.bson.codecs.Codec;
 import org.bson.codecs.configuration.CodecRegistries;
 import org.bson.codecs.configuration.CodecRegistry;
+import org.bson.conversions.Bson;
 import org.bson.diagnostics.Logger;
 import org.bson.diagnostics.Loggers;
 
@@ -1286,7 +1287,26 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
       return UpdateResult.acknowledged(0, 0L, null);
     }
 
+    // apply a version if none exists on the document (this will ensure that remote documents
+    // with no version will get a version when they are updated for the first time)
+    final BsonDocument applyVersionFilter = getDocumentIdFilter(documentId);
+    applyVersionFilter.put(DOCUMENT_VERSION_FIELD, new BsonDocument("$exists", BsonBoolean.FALSE));
+
+    getLocalCollection(namespace)
+            .updateOne(
+                    applyVersionFilter,
+                    new BsonDocument("$set",
+                            new BsonDocument(
+                                    DOCUMENT_VERSION_FIELD,
+                                    DocumentVersionInfo.getFreshVersionDocument()
+                            )
+                    )
+            );
+
+    // if a version was just applied, we still want to increment it because the document with the
+    // newly applied version is technically its own version
     final BsonDocument updateWithVersion = withVersionCounterIncField(update);
+
     final BsonDocument result = getLocalCollection(namespace)
         .findOneAndUpdate(
             getDocumentIdFilter(documentId),
@@ -1326,10 +1346,25 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
       return;
     }
 
-    final BsonDocument docToReplace = withNewVersion(
-            document,
-            DocumentVersionInfo.getFreshVersionDocument()
-    );
+    // TODO(QUESTION FOR REVIEW): in the spec, we specify that replaces should result in an
+    // increment rather than a new instance ID. if atVersion is not null, we can do this, but if
+    // it doesn't, meaning we are replacing a document with no version, we simply use a fresh
+    // version with a new instance ID. My question is, would it be better if we just always
+    // use a fresh version with a new instance ID? We don't have a huge amount of information
+    // here about the original document, and it seems like a replace is semantically similar to a
+    // delete followed by insert, which would result in a new instance ID rather than an increment
+    final BsonDocument docToReplace;
+    if (atVersion == null) {
+      docToReplace = withNewVersion(
+              document,
+              DocumentVersionInfo.getFreshVersionDocument()
+      );
+    } else {
+      docToReplace = withNewVersion(
+              document,
+              DocumentVersionInfo.withIncrementedVersionCounter(atVersion)
+      );
+    }
     final BsonDocument result = getLocalCollection(namespace)
         .findOneAndReplace(
             getDocumentIdFilter(documentId),

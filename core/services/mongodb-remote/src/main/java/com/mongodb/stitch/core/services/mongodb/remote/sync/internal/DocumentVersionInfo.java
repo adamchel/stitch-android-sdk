@@ -30,7 +30,6 @@ import org.bson.BsonValue;
 import java.util.UUID;
 
 public final class DocumentVersionInfo {
-  private final BsonValue documentId;
   private final int syncProtocolVersion;
   private final String instanceId;
   private final long versionCounter;
@@ -48,45 +47,49 @@ public final class DocumentVersionInfo {
           final BsonValue documentId,
           final BsonDocument versionForFilter
   ) {
-    this.documentId = documentId;
+    if (version != null) {
+      this.versionDoc = version;
+      this.syncProtocolVersion = versionDoc.getInt32(SYNC_PROTOCOL_VERSION_FIELD).getValue();
+      this.instanceId = versionDoc.getString(INSTANCE_ID_FIELD).getValue();
+      this.versionCounter = versionDoc.getInt64(VERSION_COUNTER_FIELD).getValue();
+    } else {
+      this.versionDoc = null;
 
-    this.versionDoc = version;
-    this.syncProtocolVersion = versionDoc.getInt32(SYNC_PROTOCOL_VERSION_FIELD).getValue();
-    this.instanceId = versionDoc.getString(INSTANCE_ID_FIELD).getValue();
-    this.versionCounter = versionDoc.getInt64(VERSION_COUNTER_FIELD).getValue();
+      this.syncProtocolVersion = -1;
+      this.instanceId = null;
+      this.versionCounter = -1;
+    }
 
     this.filter = getVersionedFilter(documentId, versionForFilter);
   }
 
-  private DocumentVersionInfo(
-          final BsonValue documentId,
-          final int syncProtocolVersion,
-          final String instanceId,
-          final long versionCounter
-  ) {
-    this.documentId = documentId;
-
-    this.syncProtocolVersion = syncProtocolVersion;
-    this.instanceId = instanceId;
-    this.versionCounter = versionCounter;
-
-    this.versionDoc = constructVersionDoc();
-    this.filter = getVersionedFilter(documentId, versionDoc);
-  }
+//  private DocumentVersionInfo(
+//          final BsonValue documentId,
+//          final int syncProtocolVersion,
+//          final String instanceId,
+//          final long versionCounter
+//  ) {
+//    this.syncProtocolVersion = syncProtocolVersion;
+//    this.instanceId = instanceId;
+//    this.versionCounter = versionCounter;
+//
+//    this.versionDoc = constructVersionDoc();
+//    this.filter = getVersionedFilter(documentId, versionDoc);
+//  }
 
   public BsonDocument getVersionDoc() {
     return versionDoc;
   }
 
-  private BsonDocument constructVersionDoc() {
-    BsonDocument versionDoc = new BsonDocument();
-
-    versionDoc.append(SYNC_PROTOCOL_VERSION_FIELD, new BsonInt32(syncProtocolVersion));
-    versionDoc.append(INSTANCE_ID_FIELD, new BsonString(instanceId));
-    versionDoc.append(VERSION_COUNTER_FIELD, new BsonInt64(versionCounter));
-
-    return versionDoc;
-  }
+//  private BsonDocument constructVersionDoc() {
+//    BsonDocument versionDoc = new BsonDocument();
+//
+//    versionDoc.append(SYNC_PROTOCOL_VERSION_FIELD, new BsonInt32(syncProtocolVersion));
+//    versionDoc.append(INSTANCE_ID_FIELD, new BsonString(instanceId));
+//    versionDoc.append(VERSION_COUNTER_FIELD, new BsonInt64(versionCounter));
+//
+//    return versionDoc;
+//  }
 
 //  public int getSyncProtocolVersion() {
 //    return syncProtocolVersion;
@@ -137,14 +140,14 @@ public final class DocumentVersionInfo {
     return new DocumentVersionInfo(version, BsonUtils.getDocumentId(remoteDocument), version);
   }
 
-  public static DocumentVersionInfo createFreshDocumentVersion(BsonDocument document) {
-    return new DocumentVersionInfo(
-            BsonUtils.getDocumentId(document),
-            1,
-            UUID.randomUUID().toString(),
-            0
-    );
-  }
+//  public static DocumentVersionInfo createFreshDocumentVersion(BsonDocument document) {
+//    return new DocumentVersionInfo(
+//            BsonUtils.getDocumentId(document),
+//            1,
+//            UUID.randomUUID().toString(),
+//            0
+//    );
+//  }
 
   public static BsonDocument getFreshVersionDocument() {
     BsonDocument versionDoc = new BsonDocument();
@@ -154,6 +157,19 @@ public final class DocumentVersionInfo {
     versionDoc.append(VERSION_COUNTER_FIELD, new BsonInt64(0));
 
     return versionDoc;
+  }
+
+  public static BsonDocument withIncrementedVersionCounter(BsonDocument versionDoc) {
+    BsonDocument newVersionDoc = new BsonDocument();
+
+    newVersionDoc.put(SYNC_PROTOCOL_VERSION_FIELD, versionDoc.get(SYNC_PROTOCOL_VERSION_FIELD));
+    newVersionDoc.put(INSTANCE_ID_FIELD, versionDoc.get(INSTANCE_ID_FIELD));
+    newVersionDoc.put(
+            VERSION_COUNTER_FIELD,
+            new BsonInt64(versionDoc.getInt64(VERSION_COUNTER_FIELD).getValue() + 1L)
+    );
+
+    return newVersionDoc;
   }
 
   /**
