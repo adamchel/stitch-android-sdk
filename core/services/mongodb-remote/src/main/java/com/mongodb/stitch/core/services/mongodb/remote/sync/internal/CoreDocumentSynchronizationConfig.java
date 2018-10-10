@@ -60,12 +60,6 @@ class CoreDocumentSynchronizationConfig {
   private BsonDocument lastKnownRemoteVersion;
   private boolean isStale;
 
-  // TODO: How can this be trimmed? The same version could appear after we see it once. That
-  // may be a non-issue.
-  // TODO: To get rid of this, an ordering on versions would be needed and would have to be
-  // abided by other clients sync and non-sync alike.
-  private Set<BsonValue> committedVersions;
-
   CoreDocumentSynchronizationConfig(
       final MongoCollection<CoreDocumentSynchronizationConfig> docsColl,
       final MongoNamespace namespace,
@@ -77,7 +71,6 @@ class CoreDocumentSynchronizationConfig {
     this.docLock = new ReentrantReadWriteLock();
     this.lastResolution = -1;
     this.lastKnownRemoteVersion = null;
-    this.committedVersions = new HashSet<>();
     this.lastUncommittedChangeEvent = null;
     this.isStale = false;
   }
@@ -92,7 +85,6 @@ class CoreDocumentSynchronizationConfig {
     this.docLock = config.docLock;
     this.lastResolution = config.lastResolution;
     this.lastKnownRemoteVersion = config.lastKnownRemoteVersion;
-    this.committedVersions = config.committedVersions;
     this.lastUncommittedChangeEvent = config.lastUncommittedChangeEvent;
     this.isStale = config.isStale;
   }
@@ -103,14 +95,12 @@ class CoreDocumentSynchronizationConfig {
       final ChangeEvent<BsonDocument> lastUncommittedChangeEvent,
       final long lastResolution,
       final BsonDocument lastVersion,
-      final Set<BsonValue> committedVersions,
       final boolean isStale
   ) {
     this.namespace = namespace;
     this.documentId = documentId;
     this.lastResolution = lastResolution;
     this.lastKnownRemoteVersion = lastVersion;
-    this.committedVersions = committedVersions;
     this.lastUncommittedChangeEvent = lastUncommittedChangeEvent;
     this.docLock = new ReentrantReadWriteLock();
     this.docsColl = null;
@@ -186,6 +176,9 @@ class CoreDocumentSynchronizationConfig {
    *
    * @param atTime      the time at which the write occurred.
    * @param atVersion   the version for which the write occurred.
+   *                    // TODO(QUESTION FOR REVIEW): so per my other comments, this means the
+   *                    // version before the write occured, right?
+   *
    * @param changeEvent the description of the write/change.
    */
   void setSomePendingWrites(
@@ -199,9 +192,6 @@ class CoreDocumentSynchronizationConfig {
       this.lastResolution = atTime;
       this.lastKnownRemoteVersion = atVersion;
 
-      if (atVersion != null) {
-        this.committedVersions.add(atVersion);
-      }
       docsColl.replaceOne(
           getDocFilter(namespace, documentId),
           this);
@@ -215,9 +205,7 @@ class CoreDocumentSynchronizationConfig {
     try {
       this.lastUncommittedChangeEvent = null;
       this.lastKnownRemoteVersion = atVersion;
-      if (atVersion != null) {
-        this.committedVersions.add(atVersion);
-      }
+
       docsColl.replaceOne(
           getDocFilter(namespace, documentId),
           this);
@@ -310,15 +298,6 @@ class CoreDocumentSynchronizationConfig {
     }
   }
 
-  public boolean hasCommittedVersion(final BsonValue version) {
-    docLock.readLock().lock();
-    try {
-      return committedVersions.contains(version);
-    } finally {
-      docLock.readLock().unlock();
-    }
-  }
-
   /**
    * Possibly coalesces the newest change event to match the user's original intent. For example,
    * an unsynchronized insert and update is still an insert.
@@ -400,8 +379,7 @@ class CoreDocumentSynchronizationConfig {
         // TODO: This may put the doc above the 16MiB but ignore for now.
         asDoc.put(ConfigCodec.Fields.LAST_UNCOMMITTED_CHANGE_EVENT, encoded);
       }
-      final BsonArray committedVersions = new BsonArray(new ArrayList<>(this.committedVersions));
-      asDoc.put(ConfigCodec.Fields.COMMITTED_VERSIONS, committedVersions);
+
       asDoc.put(ConfigCodec.Fields.IS_STALE, new BsonBoolean(isStale));
       return asDoc;
     } finally {
@@ -414,7 +392,6 @@ class CoreDocumentSynchronizationConfig {
     keyPresent(ConfigCodec.Fields.NAMESPACE_FIELD, document);
     keyPresent(ConfigCodec.Fields.SCHEMA_VERSION_FIELD, document);
     keyPresent(ConfigCodec.Fields.LAST_RESOLUTION_FIELD, document);
-    keyPresent(ConfigCodec.Fields.COMMITTED_VERSIONS, document);
     keyPresent(ConfigCodec.Fields.IS_STALE, document);
 
     final int schemaVersion =
@@ -429,8 +406,6 @@ class CoreDocumentSynchronizationConfig {
 
     final MongoNamespace namespace =
         new MongoNamespace(document.getString(ConfigCodec.Fields.NAMESPACE_FIELD).getValue());
-    final BsonArray committedVersionsArr = document.getArray(ConfigCodec.Fields.COMMITTED_VERSIONS);
-    final Set<BsonValue> committedVersions = new HashSet<>(committedVersionsArr);
 
     final BsonDocument lastVersion;
     if (document.containsKey(ConfigCodec.Fields.LAST_KNOWN_REMOTE_VERSION_FIELD)) {
@@ -456,7 +431,6 @@ class CoreDocumentSynchronizationConfig {
         lastUncommittedChangeEvent,
         document.getNumber(ConfigCodec.Fields.LAST_RESOLUTION_FIELD).longValue(),
         lastVersion,
-        committedVersions,
         document.getBoolean(ConfigCodec.Fields.IS_STALE).getValue());
   }
 
@@ -494,7 +468,6 @@ class CoreDocumentSynchronizationConfig {
       static final String LAST_RESOLUTION_FIELD = "last_resolution";
       static final String LAST_KNOWN_REMOTE_VERSION_FIELD = "last_known_remote_version";
       static final String LAST_UNCOMMITTED_CHANGE_EVENT = "last_uncommitted_change_event";
-      static final String COMMITTED_VERSIONS = "committed_versions";
       static final String IS_STALE = "is_stale";
     }
   }

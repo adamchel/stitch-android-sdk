@@ -91,17 +91,17 @@ public final class DocumentVersionInfo {
 //    return versionDoc;
 //  }
 
-//  public int getSyncProtocolVersion() {
-//    return syncProtocolVersion;
-//  }
-//
-//  public String getInstanceId() {
-//    return instanceId;
-//  }
-//
-//  public long getVersionCounter() {
-//    return versionCounter;
-//  }
+  public int getSyncProtocolVersion() {
+    return syncProtocolVersion;
+  }
+
+  public String getInstanceId() {
+    return instanceId;
+  }
+
+  public long getVersionCounter() {
+    return versionCounter;
+  }
 
 //  public DocumentVersionInfo withIncrementedVersionCounter() {
 //    return new DocumentVersionInfo(
