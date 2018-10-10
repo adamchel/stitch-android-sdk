@@ -1250,6 +1250,7 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
       final MongoNamespace namespace,
       final BsonDocument document
   ) {
+    // apply a fresh synchronization version to the document
     final BsonDocument docToInsert = withNewVersion(
             document,
             DocumentVersionInfo.getFreshVersionDocument()
@@ -1354,15 +1355,18 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
     // here about the original document, and it seems like a replace is semantically similar to a
     // delete followed by insert, which would result in a new instance ID rather than an increment
     final BsonDocument docToReplace;
+    final BsonDocument newVersion;
     if (atVersion == null) {
+      newVersion = DocumentVersionInfo.getFreshVersionDocument();
       docToReplace = withNewVersion(
               document,
-              DocumentVersionInfo.getFreshVersionDocument()
+              newVersion
       );
     } else {
+      newVersion = DocumentVersionInfo.withIncrementedVersionCounter(atVersion);
       docToReplace = withNewVersion(
               document,
-              DocumentVersionInfo.withIncrementedVersionCounter(atVersion)
+              newVersion
       );
     }
     final BsonDocument result = getLocalCollection(namespace)
@@ -1371,17 +1375,23 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
             docToReplace,
             new FindOneAndReplaceOptions().upsert(true).returnDocument(ReturnDocument.AFTER));
     final ChangeEvent<BsonDocument> event;
+
+    // TODO(QUESTION FOR REVIEW): it seems like we were previously setting pending writes at the
+    // old version, rather than the new version. Was this intentional? It seems like we should be
+    // setting the pending writes at the newly generated version. I'm confused though because if I
+    // use the new version here instead, tests fail because updates don't end up happening on a
+    // sync pass.
     if (fromDelete) {
       event = changeEventForLocalInsert(namespace, result, true);
       config.setSomePendingWrites(
           logicalT,
-          atVersion,
+          atVersion, //TODO: why don't we want newVersion?,
           event);
     } else {
       event = changeEventForLocalReplace(namespace, documentId, result, true);
       config.setSomePendingWrites(
           logicalT,
-          atVersion,
+          atVersion, //TODO: why don't we want newVersion?
           event);
     }
     emitEvent(documentId, event);
@@ -1408,11 +1418,18 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
       return;
     }
 
+    // TODO(QUESTION FOR REVIEW): Unlike replaceOrUpsertOneFromResolution, the original code
+    // here did not replace the version of the document being used to replace the document at
+    // documentId. Was this intentional? I assume that because we're updating something locally
+    // with a remote version, we want to keep the remote version, but then why are we
+    // setting a pending write here?
+
     getLocalCollection(namespace)
         .findOneAndReplace(
             getDocumentIdFilter(documentId),
             document,
             new FindOneAndReplaceOptions().upsert(true));
+
     config.setPendingWritesComplete(atVersion);
     emitEvent(documentId, changeEventForLocalReplace(namespace, documentId, document, false));
   }
