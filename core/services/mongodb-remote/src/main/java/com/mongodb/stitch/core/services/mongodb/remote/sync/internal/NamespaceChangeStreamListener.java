@@ -43,6 +43,8 @@ import org.bson.Document;
 import org.bson.diagnostics.Logger;
 import org.bson.diagnostics.Loggers;
 
+import javax.annotation.Nullable;
+
 public class NamespaceChangeStreamListener {
   private final MongoNamespace namespace;
   private final NamespaceSynchronizationConfig nsConfig;
@@ -258,7 +260,7 @@ public class NamespaceChangeStreamListener {
   }
 
   /**
-   * Returns the latest change events.
+   * Returns the latest change events, and clears them from the change stream listener.
    *
    * @return the latest change events.
    */
@@ -278,6 +280,23 @@ public class NamespaceChangeStreamListener {
       return events;
     } finally {
       nsLock.writeLock().unlock();
+    }
+  }
+
+  /**
+   * If there is an unprocessed change event for a particular document ID, fetch it from the change
+   * stream listener without removing it.
+   *
+   * @return the latest unprocessed change event for the given document ID, or null if none exists.
+   */
+  public @Nullable ChangeEvent<BsonDocument> getUnprocessedEventForDocumentId(
+          final BsonValue documentId
+  ) {
+    nsLock.readLock().lock();
+    try {
+      return this.events.get(documentId);
+    } finally {
+      nsLock.readLock().unlock();
     }
   }
 }

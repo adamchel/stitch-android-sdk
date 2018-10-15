@@ -399,6 +399,7 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
         "t='%d': syncRemoteToLocal START",
         logicalT));
 
+    // 2. Run remote to local (R2L) sync routine
     for (final NamespaceSynchronizationConfig nsConfig : syncConfig) {
       final Map<BsonValue, ChangeEvent<BsonDocument>> remoteChangeEvents =
           instanceChangeStreamListener.getEventsForNamespace(nsConfig.getNamespace());
@@ -412,6 +413,7 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
         latestDocumentMap.put(latestDocument.get("_id"), latestDocument);
       }
 
+      // a. For each unprocessed change event
       for (final Map.Entry<BsonValue, ChangeEvent<BsonDocument>> eventEntry :
           remoteChangeEvents.entrySet()) {
         logger.info(String.format(
@@ -420,6 +422,7 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
             logicalT,
             eventEntry.getValue().getOperationType()));
 
+        // i. Find the corresponding local document.
         final CoreDocumentSynchronizationConfig docConfig =
             nsConfig.getSynchronizedDocument(eventEntry.getKey().asDocument().get("_id"));
 
@@ -508,12 +511,17 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
     }
 
     logger.info(String.format(
-        Locale.US,
-        "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s processing operation='%s'",
-        logicalT,
-        nsConfig.getNamespace(),
-        docConfig.getDocumentId(),
-        remoteChangeEvent.getOperationType().toString()));
+            Locale.US,
+            "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s processing operation='%s'",
+            logicalT,
+            nsConfig.getNamespace(),
+            docConfig.getDocumentId(),
+            remoteChangeEvent.getOperationType().toString()));
+
+
+//    if (docConfig.hasUncommittedWrites()) {
+//
+//    }
 
     final BsonDocument remoteDoc = remoteChangeEvent.getFullDocument();
     final DocumentVersionInfo currentRemoteVersionInfo = DocumentVersionInfo
@@ -632,11 +640,13 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
         "t='%d': syncLocalToRemote START",
         logicalT));
 
+    // 1. Run local to remote (L2R) sync routine
     // Search for modifications in each namespace.
     for (final NamespaceSynchronizationConfig nsConfig : syncConfig) {
       final CoreRemoteMongoCollection<BsonDocument> remoteColl =
           getRemoteCollection(nsConfig.getNamespace());
 
+      // a. For each document that has local writes pending
       for (final CoreDocumentSynchronizationConfig docConfig : nsConfig) {
         if (!docConfig.hasUncommittedWrites() || docConfig.isFrozen()) {
           continue;
@@ -652,6 +662,8 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
           continue;
         }
 
+        // i. Retrieve the synthetic change event for this local document in the local config
+        //    metadata
         final ChangeEvent<BsonDocument> localChangeEvent =
             docConfig.getLastUncommittedChangeEvent();
         logger.info(String.format(
@@ -676,207 +688,266 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
             DocumentVersionInfo.getLocalVersionInfo(docConfig);
         final BsonDocument nextVersion;
 
-        switch (localChangeEvent.getOperationType()) {
-          case INSERT: {
-            nextVersion = DocumentVersionInfo.getFreshVersionDocument();
-            // It's possible that we may insert after a delete happened and we didn't get a
-            // notification for it. There's nothing we can do about this.
-            try {
-              remoteColl.insertOne(withNewVersion(localChangeEvent.getFullDocument(), nextVersion));
-            } catch (final StitchServiceException ex) {
-              if (ex.getErrorCode() != StitchServiceErrorCode.MONGODB_ERROR
-                  || !ex.getMessage().contains("E11000")) {
-                this.emitError(docConfig, String.format(
+        // ii. Check if the internal remote change stream listener has an unprocessed event for
+        //     this document.
+        final ChangeEvent<BsonDocument> unprocessedRemoteEvent =
+                instanceChangeStreamListener.getUnprocessedEventForDocumentId(
+                        nsConfig.getNamespace(),
+                        docConfig.getDocumentId());
+
+        if(unprocessedRemoteEvent != null) {
+          final DocumentVersionInfo unprocessedEventVersion =
+                  DocumentVersionInfo.getRemoteVersionInfo(unprocessedRemoteEvent.getFullDocument());
+
+          // 1. If it does and the version info is different, record that a conflict has occurred.
+          //    Difference is determined if either the GUID is different or the version counter is
+          //    greater than the local version counter.
+          if (!docConfig.hasCommittedVersion(unprocessedEventVersion)) {
+            isConflicted = true;
+            logger.info(String.format(
                     Locale.US,
-                    "t='%d': syncLocalToRemote ns=%s documentId=%s exception inserting: %s",
-                    logicalT,
-                    nsConfig.getNamespace(),
-                    docConfig.getDocumentId(),
-                    ex), ex);
-                continue;
-              }
-              logger.info(String.format(
-                  Locale.US,
-                  "t='%d': syncLocalToRemote ns=%s documentId=%s duplicate key exception on "
-                      + "insert; raising conflict",
-                  logicalT,
-                  nsConfig.getNamespace(),
-                  docConfig.getDocumentId()));
-              isConflicted = true;
-            }
-            break;
-          }
-
-          case REPLACE: {
-            if (localDoc == null) {
-              final IllegalStateException illegalStateException = new IllegalStateException(
-                  "expected document to exist for local replace change event: %s");
-
-              emitError(
-                  docConfig,
-                  illegalStateException.getMessage(),
-                  illegalStateException
-              );
-              continue;
-            }
-            nextVersion = localVersionInfo.getNextVersion();
-            final BsonDocument nextDoc = withNewVersion(localDoc, nextVersion);
-
-            final RemoteUpdateResult result;
-            try {
-              result = remoteColl.updateOne(
-                  localVersionInfo.getFilter(),
-                  nextDoc);
-            } catch (final StitchServiceException ex) {
-              this.emitError(
-                  docConfig,
-                  String.format(
-                      Locale.US,
-                      "t='%d': syncLocalToRemote ns=%s documentId=%s exception replacing: %s",
-                      logicalT,
-                      nsConfig.getNamespace(),
-                      docConfig.getDocumentId(),
-                      ex),
-                  ex
-              );
-              continue;
-            }
-            if (result.getMatchedCount() == 0) {
-              isConflicted = true;
-              logger.info(String.format(
-                  Locale.US,
-                  "t='%d': syncLocalToRemote ns=%s documentId=%s version different on replaced "
-                      + "document or document deleted; raising conflict",
-                  logicalT,
-                  nsConfig.getNamespace(),
-                  docConfig.getDocumentId()));
-            }
-            break;
-          }
-
-          case UPDATE: {
-            if (localDoc == null) {
-              final IllegalStateException illegalStateException = new IllegalStateException(
-                  "expected document to exist for local update change event");
-              emitError(
-                  docConfig,
-                  illegalStateException.getMessage(),
-                  illegalStateException
-              );
-              continue;
-            }
-            nextVersion = localVersionInfo.getNextVersion();
-            final BsonDocument nextDoc = withNewVersion(localDoc, nextVersion);
-
-            final BsonDocument translatedUpdate = new BsonDocument();
-            if (!localChangeEvent.getUpdateDescription().getUpdatedFields().isEmpty()) {
-              final BsonDocument sets = new BsonDocument();
-              for (final Map.Entry<String, BsonValue> fieldValue :
-                  localChangeEvent.getUpdateDescription().getUpdatedFields().entrySet()) {
-                sets.put(fieldValue.getKey(), fieldValue.getValue());
-              }
-              sets.put(DOCUMENT_VERSION_FIELD, nextVersion);
-              translatedUpdate.put("$set", sets);
-            }
-            if (!localChangeEvent.getUpdateDescription().getRemovedFields().isEmpty()) {
-              final BsonDocument unsets = new BsonDocument();
-              for (final String field :
-                  localChangeEvent.getUpdateDescription().getRemovedFields()) {
-                unsets.put(field, BsonBoolean.TRUE);
-              }
-              translatedUpdate.put("$unset", unsets);
-            }
-
-            final RemoteUpdateResult result;
-            try {
-              result = remoteColl.updateOne(
-                  localVersionInfo.getFilter(),
-                  translatedUpdate.isEmpty()
-                      // See: changeEventForLocalUpdate for why we do this
-                      ? nextDoc : translatedUpdate);
-            } catch (final StitchServiceException ex) {
-              emitError(
-                  docConfig,
-                  String.format(
-                      Locale.US,
-                      "t='%d': syncLocalToRemote ns=%s documentId=%s exception updating: %s",
-                      logicalT,
-                      nsConfig.getNamespace(),
-                      docConfig.getDocumentId(),
-                      ex),
-                  ex
-              );
-              continue;
-            }
-            if (result.getMatchedCount() == 0) {
-              isConflicted = true;
-              logger.info(String.format(
-                  Locale.US,
-                  "t='%d': syncLocalToRemote ns=%s documentId=%s version different on updated "
-                      + "document or document deleted; raising conflict",
-                  logicalT,
-                  nsConfig.getNamespace(),
-                  docConfig.getDocumentId()));
-            }
-            break;
-          }
-
-          case DELETE: {
-            nextVersion = null;
-            final RemoteDeleteResult result;
-            try {
-              result = remoteColl.deleteOne(DocumentVersionInfo.getVersionedFilter(
-                  docConfig.getDocumentId(),
-                  docConfig.getLastKnownRemoteVersion()));
-            } catch (final StitchServiceException ex) {
-              emitError(
-                  docConfig,
-                  String.format(
-                      Locale.US,
-                      "t='%d': syncLocalToRemote ns=%s documentId=%s exception deleting: %s",
-                      logicalT,
-                      nsConfig.getNamespace(),
-                      docConfig.getDocumentId(),
-                      ex),
-                  ex
-              );
-              continue;
-            }
-            if (result.getDeletedCount() == 0) {
-              remoteDocument = remoteColl.find(docFilter).first();
-              remoteDocumentFetched = true;
-              if (remoteDocument != null) {
-                isConflicted = true;
-                logger.info(String.format(
-                    Locale.US,
-                    "t='%d': syncLocalToRemote ns=%s documentId=%s version different on removed "
-                        + "document; raising conflict",
+                    "t='%d': syncLocalToRemote ns=%s documentId=%s version different on "
+                            + "unprocessed change event for document; raising conflict",
                     logicalT,
                     nsConfig.getNamespace(),
                     docConfig.getDocumentId()));
+          }
+        }
+
+        // iii. Check the operation type
+        if (!isConflicted) {
+          // 2. Otherwise continue on to checking the operation type.
+          switch (localChangeEvent.getOperationType()) {
+            // 1. INSERT
+            case INSERT: {
+              nextVersion = DocumentVersionInfo.getFreshVersionDocument();
+
+              // It's possible that we may insert after a delete happened and we didn't get a
+              // notification for it. There's nothing we can do about this.
+
+              // a. Insert document into remote database
+              try {
+                remoteColl.insertOne(withNewVersion(localChangeEvent.getFullDocument(), nextVersion));
+              } catch (final StitchServiceException ex) {
+                // b. If an error happens:
+
+                // i. That is not a duplicate key exception, report an error to the error listener.
+                if (ex.getErrorCode() != StitchServiceErrorCode.MONGODB_ERROR
+                        || !ex.getMessage().contains("E11000")) {
+                  this.emitError(docConfig, String.format(
+                          Locale.US,
+                          "t='%d': syncLocalToRemote ns=%s documentId=%s exception inserting: %s",
+                          logicalT,
+                          nsConfig.getNamespace(),
+                          docConfig.getDocumentId(),
+                          ex), ex);
+                  continue;
+                }
+
+                // ii. Otherwise record that a conflict has occurred.
+                logger.info(String.format(
+                        Locale.US,
+                        "t='%d': syncLocalToRemote ns=%s documentId=%s duplicate key exception on "
+                                + "insert; raising conflict",
+                        logicalT,
+                        nsConfig.getNamespace(),
+                        docConfig.getDocumentId()));
+                isConflicted = true;
+              }
+              break;
+            }
+
+
+            // 2. REPLACE
+            case REPLACE: {
+              if (localDoc == null) {
+                final IllegalStateException illegalStateException = new IllegalStateException(
+                        "expected document to exist for local replace change event: %s");
+
+                emitError(
+                        docConfig,
+                        illegalStateException.getMessage(),
+                        illegalStateException
+                );
+                continue;
+              }
+              nextVersion = localVersionInfo.getNextVersion();
+              final BsonDocument nextDoc = withNewVersion(localDoc, nextVersion);
+
+              // a. Update the document in the remote database using a query for the _id and the
+              //    version with an update containing the replacement document with the version
+              //    counter incremented by 1.
+              final RemoteUpdateResult result;
+              try {
+                result = remoteColl.updateOne(
+                        localVersionInfo.getFilter(),
+                        nextDoc);
+              } catch (final StitchServiceException ex) {
+                // b. If an error happens, report an error to the error listener.
+                this.emitError(
+                        docConfig,
+                        String.format(
+                                Locale.US,
+                                "t='%d': syncLocalToRemote ns=%s documentId=%s exception replacing: %s",
+                                logicalT,
+                                nsConfig.getNamespace(),
+                                docConfig.getDocumentId(),
+                                ex),
+                        ex
+                );
+                continue;
+              }
+              // c. If no documents are matched, record that a conflict has occurred.
+              if (result.getMatchedCount() == 0) {
+                isConflicted = true;
+                logger.info(String.format(
+                        Locale.US,
+                        "t='%d': syncLocalToRemote ns=%s documentId=%s version different on replaced "
+                                + "document or document deleted; raising conflict",
+                        logicalT,
+                        nsConfig.getNamespace(),
+                        docConfig.getDocumentId()));
+              }
+              break;
+            }
+
+            // 3. UPDATE
+            case UPDATE: {
+              if (localDoc == null) {
+                final IllegalStateException illegalStateException = new IllegalStateException(
+                        "expected document to exist for local update change event");
+                emitError(
+                        docConfig,
+                        illegalStateException.getMessage(),
+                        illegalStateException
+                );
+                continue;
+              }
+              nextVersion = localVersionInfo.getNextVersion();
+              final BsonDocument nextDoc = withNewVersion(localDoc, nextVersion);
+
+              // a. Update the document in the remote database using a query for the _id and the
+              //    version with an update containing the replacement document with the version
+              //    counter incremented by 1.
+              final BsonDocument translatedUpdate = new BsonDocument();
+              if (!localChangeEvent.getUpdateDescription().getUpdatedFields().isEmpty()) {
+                final BsonDocument sets = new BsonDocument();
+                for (final Map.Entry<String, BsonValue> fieldValue :
+                        localChangeEvent.getUpdateDescription().getUpdatedFields().entrySet()) {
+                  sets.put(fieldValue.getKey(), fieldValue.getValue());
+                }
+                sets.put(DOCUMENT_VERSION_FIELD, nextVersion);
+                translatedUpdate.put("$set", sets);
+              }
+              if (!localChangeEvent.getUpdateDescription().getRemovedFields().isEmpty()) {
+                final BsonDocument unsets = new BsonDocument();
+                for (final String field :
+                        localChangeEvent.getUpdateDescription().getRemovedFields()) {
+                  unsets.put(field, BsonBoolean.TRUE);
+                }
+                translatedUpdate.put("$unset", unsets);
+              }
+
+              final RemoteUpdateResult result;
+              try {
+                result = remoteColl.updateOne(
+                        localVersionInfo.getFilter(),
+                        translatedUpdate.isEmpty()
+                                // See: changeEventForLocalUpdate for why we do this
+                                ? nextDoc : translatedUpdate);
+              } catch (final StitchServiceException ex) {
+                // b. If an error happens, report an error to the error listener.
+                emitError(
+                        docConfig,
+                        String.format(
+                                Locale.US,
+                                "t='%d': syncLocalToRemote ns=%s documentId=%s exception updating: %s",
+                                logicalT,
+                                nsConfig.getNamespace(),
+                                docConfig.getDocumentId(),
+                                ex),
+                        ex
+                );
+                continue;
+              }
+              if (result.getMatchedCount() == 0) {
+                // c. If no documents are matched, record that a conflict has occurred.
+                isConflicted = true;
+                logger.info(String.format(
+                        Locale.US,
+                        "t='%d': syncLocalToRemote ns=%s documentId=%s version different on updated "
+                                + "document or document deleted; raising conflict",
+                        logicalT,
+                        nsConfig.getNamespace(),
+                        docConfig.getDocumentId()));
+              }
+              break;
+            }
+
+            case DELETE: {
+              nextVersion = null;
+              final RemoteDeleteResult result;
+              // a. Delete the document in the remote database using a query for the _id and the
+              //    version.
+              try {
+                result = remoteColl.deleteOne(localVersionInfo.getFilter());
+              } catch (final StitchServiceException ex) {
+                // b. If an error happens, report an error to the error listener.
+                emitError(
+                        docConfig,
+                        String.format(
+                                Locale.US,
+                                "t='%d': syncLocalToRemote ns=%s documentId=%s exception deleting: %s",
+                                logicalT,
+                                nsConfig.getNamespace(),
+                                docConfig.getDocumentId(),
+                                ex),
+                        ex
+                );
+                continue;
+              }
+              // c. If no documents are matched, record that a conflict has occurred.
+              if (result.getDeletedCount() == 0) {
+                remoteDocument = remoteColl.find(docFilter).first();
+                remoteDocumentFetched = true;
+                if (remoteDocument != null) {
+                  isConflicted = true;
+                  logger.info(String.format(
+                          Locale.US,
+                          "t='%d': syncLocalToRemote ns=%s documentId=%s version different on removed "
+                                  + "document; raising conflict",
+                          logicalT,
+                          nsConfig.getNamespace(),
+                          docConfig.getDocumentId()));
+                } else {
+                  // d. Desynchronize the document if there is no conflict, or if fetching a remote
+                  //    document after the conflict is raised returns no remote document.
+                  desyncDocumentFromRemote(nsConfig.getNamespace(), docConfig.getDocumentId());
+                }
               } else {
                 desyncDocumentFromRemote(nsConfig.getNamespace(), docConfig.getDocumentId());
               }
-            } else {
-              desyncDocumentFromRemote(nsConfig.getNamespace(), docConfig.getDocumentId());
+              break;
             }
-            break;
-          }
 
-          default:
-            emitError(
-                docConfig,
-                String.format(
-                    Locale.US,
-                    "t='%d': syncLocalToRemote ns=%s documentId=%s unknown operation type occurred "
-                        + "on the document: %s; dropping the event",
-                    logicalT,
-                    nsConfig.getNamespace(),
-                    docConfig.getDocumentId(),
-                    localChangeEvent.getOperationType().toString())
-            );
-            continue;
+            default:
+              emitError(
+                      docConfig,
+                      String.format(
+                              Locale.US,
+                              "t='%d': syncLocalToRemote ns=%s documentId=%s unknown operation type occurred "
+                                      + "on the document: %s; dropping the event",
+                              logicalT,
+                              nsConfig.getNamespace(),
+                              docConfig.getDocumentId(),
+                              localChangeEvent.getOperationType().toString())
+              );
+              continue;
+          }
+        } else {
+          nextVersion = null;
         }
+
 
         logger.info(String.format(
             Locale.US,
@@ -886,37 +957,53 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
             docConfig.getDocumentId(),
             isConflicted));
 
-        if (isConflicted) {
-          final ChangeEvent<BsonDocument> remoteChangeEvent;
-          if (!remoteDocumentFetched) {
-            remoteChangeEvent =
-                getSynthesizedRemoteChangeEventForDocument(remoteColl, docConfig.getDocumentId());
-          } else {
-            remoteChangeEvent =
-                getSynthesizedRemoteChangeEventForDocument(
-                    remoteColl.getNamespace(),
-                    docConfig.getDocumentId(),
-                    remoteDocument);
-          }
+        if (!isConflicted) {
+          // iv. If no conflict has occurred, move on to the remote to local sync routine.
 
-          resolveConflict(
-              nsConfig.getNamespace(),
-              docConfig,
-              remoteChangeEvent);
-        } else {
           // TODO(STITCH-1972): This event may contain old version info. We should be filtering out
           // the version anyway from local and remote events.
           final ChangeEvent<BsonDocument> committedEvent =
-              docConfig.getLastUncommittedChangeEvent();
+                  docConfig.getLastUncommittedChangeEvent();
           emitEvent(docConfig.getDocumentId(), new ChangeEvent<>(
-              committedEvent.getId(),
-              committedEvent.getOperationType(),
-              committedEvent.getFullDocument(),
-              committedEvent.getNamespace(),
-              committedEvent.getDocumentKey(),
-              committedEvent.getUpdateDescription(),
-              false));
+                  committedEvent.getId(),
+                  committedEvent.getOperationType(),
+                  committedEvent.getFullDocument(),
+                  committedEvent.getNamespace(),
+                  committedEvent.getDocumentKey(),
+                  committedEvent.getUpdateDescription(),
+                  false));
+
+          if(nextVersion == null) {
+            final IllegalStateException illegalStateException = new IllegalStateException(
+                    "expected completed write to have version");
+
+            emitError(
+                    docConfig,
+                    illegalStateException.getMessage(),
+                    illegalStateException
+            );
+          }
           docConfig.setPendingWritesComplete(nextVersion);
+        } else {
+          // v. Otherwise, invoke the collection-level conflict handler with the local change event
+          //    and the remote change event (synthesized by doing a lookup of the document or sourced
+          //    from the listener)
+          final ChangeEvent<BsonDocument> remoteChangeEvent;
+          if (!remoteDocumentFetched) {
+            remoteChangeEvent =
+                    getSynthesizedRemoteChangeEventForDocument(remoteColl, docConfig.getDocumentId());
+          } else {
+            remoteChangeEvent =
+                    getSynthesizedRemoteChangeEventForDocument(
+                            remoteColl.getNamespace(),
+                            docConfig.getDocumentId(),
+                            remoteDocument);
+          }
+
+          resolveConflict(
+                  nsConfig.getNamespace(),
+                  docConfig,
+                  remoteChangeEvent);
         }
       }
     }
@@ -925,6 +1012,9 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
         Locale.US,
         "t='%d': syncLocalToRemote END",
         logicalT));
+
+    // 3. If there are still local writes pending for the document, it will go through the L2R
+    //    phase on a subsequent pass and try to commit changes again.
   }
 
   private void emitError(final CoreDocumentSynchronizationConfig docConfig,
@@ -994,6 +1084,7 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
         docConfig.getLastUncommittedChangeEvent().getOperationType(),
         remoteEvent.getOperationType()));
 
+    // 2. Based on the result of the handler determine the next state of the document.
     final Object resolvedDocument;
     final ChangeEvent transformedRemoteEvent;
     try {
@@ -1046,6 +1137,7 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
             || (remoteEvent.getFullDocument() != null
             && transformedRemoteEvent.getFullDocument().equals(resolvedDocument));
 
+    // a. If the resolved document is null:
     if (resolvedDocument == null) {
       logger.info(String.format(
           Locale.US,
@@ -1056,11 +1148,17 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
           docConfig.getDocumentId()));
 
       if (acceptRemote) {
+        // i. If the remote event was a DELETE, delete the document locally, desynchronize the
+        //    document, and emit a change event for the deletion.
         deleteOneFromRemote(namespace, docConfig.getDocumentId());
       } else {
+        // ii. Otherwise, delete the document locally, mark that there are pending writes for this
+        //     document, and emit a change event for the deletion.
         deleteOneFromResolution(namespace, docConfig.getDocumentId(), remoteVersion);
       }
     } else {
+      // b. If the resolved document is not null:
+
       // Update the document locally which will keep the pending writes but with
       // a new version next time around.
       @SuppressWarnings("unchecked")
@@ -1077,14 +1175,18 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
           namespace,
           docConfig.getDocumentId(),
           docForStorage.toJson()));
-
       if (acceptRemote) {
+        // i. If the remote document is equal to the resolved document, replace the document
+        //    locally, mark the document as having no pending writes, and emit a REPLACE change
+        //    event.
         replaceOrUpsertOneFromRemote(
             namespace,
             docConfig.getDocumentId(),
             docForStorage,
             remoteVersion);
       } else {
+        // ii. Otherwise, replace the local document with the resolved document locally, mark that
+        //     there are pending writes for this document, and emit a REPLACE change event.
         replaceOrUpsertOneFromResolution(
             namespace,
             docConfig.getDocumentId(),
@@ -1148,10 +1250,12 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
       final BsonValue documentId,
       final BsonDocument document
   ) {
+    // a. When the document is looked up, if it cannot be found the synthesized change event is a
+    // DELETE, otherwise it's a REPLACE.
     if (document == null) {
       return changeEventForLocalDelete(ns, documentId, false);
     }
-    return changeEventForLocalInsert(ns, document, false);
+    return changeEventForLocalReplace(ns, documentId, document, false);
   }
 
   /**
