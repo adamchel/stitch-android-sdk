@@ -37,13 +37,13 @@ import java.util.Set;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import javax.annotation.Nullable;
+
 import org.bson.BsonDocument;
 import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.diagnostics.Logger;
 import org.bson.diagnostics.Loggers;
-
-import javax.annotation.Nullable;
 
 public class NamespaceChangeStreamListener {
   private final MongoNamespace namespace;

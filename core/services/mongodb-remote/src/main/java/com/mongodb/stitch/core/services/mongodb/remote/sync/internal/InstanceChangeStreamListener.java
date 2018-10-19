@@ -21,10 +21,10 @@ import com.mongodb.stitch.core.internal.common.Callback;
 
 import java.util.Map;
 
+import javax.annotation.Nullable;
+
 import org.bson.BsonDocument;
 import org.bson.BsonValue;
-
-import javax.annotation.Nullable;
 
 interface InstanceChangeStreamListener {
   /**
