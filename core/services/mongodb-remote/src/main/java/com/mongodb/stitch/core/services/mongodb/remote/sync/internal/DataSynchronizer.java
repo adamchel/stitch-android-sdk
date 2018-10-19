@@ -436,6 +436,9 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
         syncRemoteChangeEventToLocal(nsConfig, docConfig, eventEntry.getValue());
       }
 
+      // For synchronized documents that had no unprocessed change event, but were marked as stale,
+      // synthesize a remote replace event to replace the local stale document with the latest
+      // remote copy.
       for (final BsonValue docId : unseenIds) {
         final CoreDocumentSynchronizationConfig docConfig =
             nsConfig.getSynchronizedDocument(docId);
@@ -459,6 +462,9 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
         }
       }
 
+      // For synchronized documents that had no unprocessed change event, and did not have a latest
+      // version when stale documents were queried, synthesize a remote delete event to delete
+      // the local document.
       if (unseenIds.removeAll(latestDocumentIds)) {
         for (final BsonValue unseenId : unseenIds) {
           final CoreDocumentSynchronizationConfig docConfig =
@@ -518,14 +524,8 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
             docConfig.getDocumentId(),
             remoteChangeEvent.getOperationType().toString()));
 
-
-//    if (docConfig.hasUncommittedWrites()) {
-//
-//    }
-
-    final BsonDocument remoteDoc = remoteChangeEvent.getFullDocument();
     final DocumentVersionInfo currentRemoteVersionInfo = DocumentVersionInfo
-            .getRemoteVersionInfo(remoteDoc);
+            .getRemoteVersionInfo(remoteChangeEvent.getFullDocument());
 
     if (currentRemoteVersionInfo.hasVersion()
         && currentRemoteVersionInfo.getVersion().getSyncProtocolVersion() != 1) {
@@ -545,6 +545,8 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
       return;
     }
 
+    // TODO(QUESTION FOR REVIEW): This code is not in the spec, but if I don't include it, then
+    // testInsertThenSyncUpdateThenUpdate will fail. Should I add it to the spec?
     if (docConfig.hasCommittedVersion(currentRemoteVersionInfo)) {
       // Skip this event since we generated it.
       logger.info(String.format(
@@ -558,6 +560,8 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
     }
 
 
+    // ii. If the document does not have local writes pending, apply the change event to the local
+    //     document and emit a change event for it.
     if (docConfig.getLastUncommittedChangeEvent() == null) {
       switch (remoteChangeEvent.getOperationType()) {
         case REPLACE:
@@ -599,34 +603,155 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
                   nsConfig.getNamespace(),
                   docConfig.getDocumentId(),
                   remoteChangeEvent.getOperationType().toString()));
-          break;
+          return;
       }
     }
 
-    // Check for pending writes on this version
-    {
-      final DocumentVersionInfo lastKnownLocalVersionInfo = DocumentVersionInfo
-            .getLocalVersionInfo(docConfig);
+    // At this point, we know there is a pending write for this document, so we will either drop
+    // the event if we know it is already applied or we know the event is stale, or we will raise a
+    // conflict.
 
-      // There is a pending write that must skip R2L if both versions are empty. The absence of a
-      // version is effectively a version. The pending write, if it's not a delete, should be
-      // setting a new version anyway.
-      if (!lastKnownLocalVersionInfo.hasVersion() && !currentRemoteVersionInfo.hasVersion()) {
+    // iii. Otherwise, check if the version info of the incoming remote change event is different
+    //      from the version of the local document.
+    final DocumentVersionInfo lastKnownLocalVersionInfo = DocumentVersionInfo
+          .getLocalVersionInfo(docConfig);
+
+    // 1. If both the local document version and the remote change event version are empty, drop
+    //    the event. The absence of a version is effectively a version, and the pending write will
+    //    set a version on the next L2R pass if it’s not a delete.
+    if (!lastKnownLocalVersionInfo.hasVersion() && !currentRemoteVersionInfo.hasVersion()) {
+      logger.info(String.format(
+          Locale.US,
+          "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s remote and local have same "
+              + "empty version but a write is pending; waiting for next L2R pass",
+          logicalT,
+          nsConfig.getNamespace(),
+          docConfig.getDocumentId()));
+      return;
+    }
+
+    // 2. If either the local document version or the remote change event version are empty, raise
+    //    a conflict. The absence of a version is effectively a version, and a remote change event
+    //    with no version indicates a document that may have been committed by another client not
+    //    adhering to the mobile sync protocol.
+    if (!lastKnownLocalVersionInfo.hasVersion() || !currentRemoteVersionInfo.hasVersion()) {
+      logger.info(String.format(
+              Locale.US,
+              "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s remote and local have same "
+                      + "empty version but a write is pending; waiting for next L2R pass",
+              logicalT,
+              nsConfig.getNamespace(),
+              docConfig.getDocumentId()));
+      resolveConflict(nsConfig.getNamespace(), docConfig, remoteChangeEvent);
+      return;
+    }
+
+    // 3. Check if the GUID of the two versions are the same.
+    final DocumentVersionInfo.Version localVersion = lastKnownLocalVersionInfo.getVersion();
+    final DocumentVersionInfo.Version remoteVersion = currentRemoteVersionInfo.getVersion();
+    if (localVersion.instanceId.equals(remoteVersion.instanceId)) {
+      // a. If the GUIDs are the same, compare the version counter of the remote change event with
+      //    the version counter of the local document
+      if (localVersion.versionCounter <= remoteVersion.versionCounter) {
+        // i. drop the event if the version counter of the remote event less than or equal to the
+        // version counter of the local document
         logger.info(String.format(
-            Locale.US,
-            "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s remote and local have same "
-                + "empty version but a write is pending; waiting for next L2R pass",
-            logicalT,
-            nsConfig.getNamespace(),
-            docConfig.getDocumentId()));
+                Locale.US,
+                "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s remote change event "
+                        + "is stale; dropping the event",
+                logicalT,
+                nsConfig.getNamespace(),
+                docConfig.getDocumentId()));
+        return;
+      } else {
+        // ii. raise a conflict if the version counter of the remote event is greater than the
+        //     version counter of the local document
+        logger.info(String.format(
+                Locale.US,
+                "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s remote event version "
+                        + "has higher counter than local version but a write is pending; "
+                        + "raising conflict",
+                logicalT,
+                nsConfig.getNamespace(),
+                docConfig.getDocumentId()));
+        resolveConflict(
+                nsConfig.getNamespace(),
+                docConfig,
+                remoteChangeEvent);
         return;
       }
     }
 
+    // b.  If the GUIDs are different, do a full document lookup against the remote server to
+    //     fetch the latest version (this is to guard against the case where the unprocessed
+    //     change event is stale).
+    final BsonDocument newestRemoteDocument = this.getRemoteCollection(nsConfig.getNamespace())
+            .find(new Document("_id", docConfig.getDocumentId())).first();
+
+    if (newestRemoteDocument == null) {
+      // i. If the document is not found with a remote lookup, this means the document was
+      //    deleted remotely, so raise a conflict using a synthesized delete event as the remote
+      //    change event.
+      logger.info(String.format(
+              Locale.US,
+              "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s remote event version "
+                      + "stale and latest document lookup indicates a remote delete occurred, but "
+                      + "a write is pending; raising conflict",
+              logicalT,
+              nsConfig.getNamespace(),
+              docConfig.getDocumentId()));
+      resolveConflict(
+              nsConfig.getNamespace(),
+              docConfig,
+              changeEventForLocalDelete(
+                      nsConfig.getNamespace(),
+                      docConfig.getDocumentId(),
+                      docConfig.hasUncommittedWrites()));
+      return;
+    }
+
+
+    DocumentVersionInfo newestRemoteVersionInfo =
+            DocumentVersionInfo.getRemoteVersionInfo(newestRemoteDocument);
+
+    // ii. If the current GUID of the remote document (as determined by this lookup) is equal
+    //     to the GUID of the local document, drop the event. We’re believed to be behind in
+    //     the change stream at this point.
+    if (newestRemoteVersionInfo.hasVersion() &&
+            newestRemoteVersionInfo.getVersion().getInstanceId()
+                    .equals(localVersion.instanceId)) {
+
+      logger.info(String.format(
+              Locale.US,
+              "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s latest document lookup "
+                      + "indicates that this is a stale event; dropping the event",
+              logicalT,
+              nsConfig.getNamespace(),
+              docConfig.getDocumentId()));
+      return;
+
+    }
+
+    // iii. If the current GUID of the remote document is not equal to the GUID of the local
+    //      document, raise a conflict using a synthesized replace event as the remote change
+    //      event. This means the remote document is a legitimately new document and we should
+    //      handle the conflict.
+    logger.info(String.format(
+            Locale.US,
+            "t='%d': syncRemoteChangeEventToLocal ns=%s documentId=%s latest document lookup "
+                    + "indicates a remote replace occurred, but a local write is pending; raising "
+                    + "conflict with synthesized replace event",
+            logicalT,
+            nsConfig.getNamespace(),
+            docConfig.getDocumentId()));
     resolveConflict(
-        nsConfig.getNamespace(),
-        docConfig,
-        remoteChangeEvent);
+            nsConfig.getNamespace(),
+            docConfig,
+            changeEventForLocalReplace(
+                    nsConfig.getNamespace(),
+                    docConfig.getDocumentId(),
+                    newestRemoteDocument,
+                    docConfig.hasUncommittedWrites()));
   }
 
   /**
