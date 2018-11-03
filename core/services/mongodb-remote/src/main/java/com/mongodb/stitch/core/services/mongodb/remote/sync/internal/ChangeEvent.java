@@ -554,10 +554,9 @@ public final class ChangeEvent<DocumentT> {
     return new ChangeEvent<>(
         event.getId(),
         event.getOperationType(),
-        event.getFullDocument() == null ? null : codec
-//            .decode(withoutForbiddenFields(event.getFullDocument()).asBsonReader(),
-            .decode(event.getFullDocument().asBsonReader(),
-                    DecoderContext.builder().build()),
+        event.getFullDocument() == null ? null : codec.decode(
+                withoutForbiddenFields(event.getFullDocument()).asBsonReader(),
+                DecoderContext.builder().build()),
         event.getNamespace(),
         event.getDocumentKey(),
         event.getUpdateDescription(),

@@ -2344,8 +2344,10 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
    * @return a clone of the given document without forbidden fields
    */
   static BsonDocument withoutForbiddenFields(final BsonDocument document) {
+    if (document == null) return null;
+
     final BsonDocument filteredDoc = document.clone();
-    document.remove(DOCUMENT_VERSION_FIELD);
+    filteredDoc.remove(DOCUMENT_VERSION_FIELD);
     return filteredDoc;
   }
 
@@ -2370,6 +2372,7 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
           final BsonDocument document,
           final BsonValue documentId
   ) {
+    if (document == null) return;
     if (document.containsKey(DOCUMENT_VERSION_FIELD)) {
       document.remove(DOCUMENT_VERSION_FIELD);
 
@@ -2389,6 +2392,7 @@ public class DataSynchronizer implements NetworkMonitor.StateListener {
    * @param document the document from which to remove forbidden fields
    */
   private static void sanitizeDocument(final BsonDocument document) {
+    if (document == null) return;
     document.remove(DOCUMENT_VERSION_FIELD);
   }
 

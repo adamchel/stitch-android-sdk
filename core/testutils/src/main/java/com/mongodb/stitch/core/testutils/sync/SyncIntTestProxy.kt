@@ -66,8 +66,10 @@ class SyncIntTestProxy(private val syncTestRunner: SyncIntTestRunner) {
 
             // start watching it and always set the value to hello world in a conflict
             syncOperations.configure(ConflictHandler { id: BsonValue, localEvent: ChangeEvent<Document>, remoteEvent: ChangeEvent<Document> ->
-//                assertNoVersionFieldsInDoc(localEvent.fullDocument)
-//                assertNoVersionFieldsInDoc(remoteEvent.fullDocument)
+                // ensure that there is no version information on the documents in the conflict handler
+                assertNoVersionFieldsInDoc(localEvent.fullDocument)
+                assertNoVersionFieldsInDoc(remoteEvent.fullDocument)
+
                 if (id == doc1Id) {
                     val merged = localEvent.fullDocument.getInteger("foo") +
                         remoteEvent.fullDocument.getInteger("foo")
@@ -1213,6 +1215,9 @@ class SyncIntTestProxy(private val syncTestRunner: SyncIntTestRunner) {
 
             val eventSemaphore = Semaphore(0)
             coll.configure(failingConflictHandler, ChangeEventListener { _, event ->
+                // ensure that there is no version information in the event document.
+                assertNoVersionFieldsInDoc(event.fullDocument)
+
                 if (event.operationType == ChangeEvent.OperationType.UPDATE &&
                     !event.hasUncommittedWrites()) {
                     assertEquals(
