@@ -18,6 +18,8 @@ package com.mongodb.stitch.core.services.mongodb.remote.sync.internal;
 
 import static com.mongodb.stitch.core.internal.common.Assertions.keyPresent;
 import static com.mongodb.stitch.core.services.mongodb.remote.sync.internal.CoreDocumentSynchronizationConfig.getDocFilter;
+import static com.mongodb.stitch.core.services.mongodb.remote.sync.internal.CoreDocumentSynchronizationConfig.getNamespaceForStorage;
+import static com.mongodb.stitch.core.services.mongodb.remote.sync.internal.CoreDocumentSynchronizationConfig.getNamespaceFromStorage;
 
 import com.mongodb.Block;
 import com.mongodb.MongoNamespace;
@@ -78,7 +80,7 @@ class NamespaceSynchronizationConfig
     final BsonDocument docsFilter = new BsonDocument();
     docsFilter.put(
         CoreDocumentSynchronizationConfig.ConfigCodec.Fields.NAMESPACE_FIELD,
-        new BsonString(namespace.toString()));
+        CoreDocumentSynchronizationConfig.getNamespaceForStorage(namespace));
     docsColl.find(docsFilter).forEach(new Block<CoreDocumentSynchronizationConfig>() {
       @Override
       public void apply(
@@ -106,7 +108,7 @@ class NamespaceSynchronizationConfig
     final BsonDocument docsFilter = new BsonDocument();
     docsFilter.put(
         CoreDocumentSynchronizationConfig.ConfigCodec.Fields.NAMESPACE_FIELD,
-        new BsonString(namespace.toString()));
+        CoreDocumentSynchronizationConfig.getNamespaceForStorage(namespace));
     docsColl.find(docsFilter).forEach(new Block<CoreDocumentSynchronizationConfig>() {
       @Override
       public void apply(
@@ -155,7 +157,7 @@ class NamespaceSynchronizationConfig
       final MongoNamespace namespace
   ) {
     final BsonDocument filter = new BsonDocument();
-    filter.put(ConfigCodec.Fields.NAMESPACE_FIELD, new BsonString(namespace.toString()));
+    filter.put(ConfigCodec.Fields.NAMESPACE_FIELD, getNamespaceForStorage(namespace));
     return filter;
   }
 
@@ -294,8 +296,8 @@ class NamespaceSynchronizationConfig
     nsLock.readLock().lock();
     try {
       final BsonDocument asDoc = new BsonDocument();
-      asDoc.put(ConfigCodec.Fields.NAMESPACE_FIELD, new BsonString(getNamespace().toString()));
-      asDoc.put(ConfigCodec.Fields.SCHEMA_VERSION_FIELD, new BsonInt32(1));
+      asDoc.put(ConfigCodec.Fields.NAMESPACE_FIELD, getNamespaceForStorage(namespace));
+      asDoc.put(ConfigCodec.Fields.SCHEMA_VERSION_FIELD, new BsonInt32(2));
       return asDoc;
     } finally {
       nsLock.readLock().unlock();
@@ -312,7 +314,7 @@ class NamespaceSynchronizationConfig
 
     final int schemaVersion =
         document.getNumber(ConfigCodec.Fields.SCHEMA_VERSION_FIELD).intValue();
-    if (schemaVersion != 1) {
+    if (schemaVersion != 1 && schemaVersion != 2) {
       throw new IllegalStateException(
           String.format(
               "unexpected schema version '%d' for %s",
@@ -320,8 +322,18 @@ class NamespaceSynchronizationConfig
               CoreDocumentSynchronizationConfig.class.getSimpleName()));
     }
 
-    return new NamespaceSynchronizationConfig(
-        new MongoNamespace(document.getString(ConfigCodec.Fields.NAMESPACE_FIELD).getValue()));
+    final MongoNamespace namespace;
+
+    // old schema version used namespace string instead of document
+    if (schemaVersion == 1) {
+      namespace =
+          new MongoNamespace(document.getString(ConfigCodec.Fields.NAMESPACE_FIELD).getValue());
+    } else {
+      namespace =
+          getNamespaceFromStorage(document.getDocument(ConfigCodec.Fields.NAMESPACE_FIELD));
+    }
+
+    return new NamespaceSynchronizationConfig(namespace);
   }
 
   static final ConfigCodec configCodec = new ConfigCodec();

@@ -72,7 +72,10 @@ class CoreDocumentSynchronizationConfigUnitTests {
 
         assertEquals(
                 docFilter[CoreDocumentSynchronizationConfig.ConfigCodec.Fields.NAMESPACE_FIELD],
-                BsonString(namespace.toString()))
+                BsonDocument()
+                        .append("db", BsonString(namespace.databaseName))
+                        .append("coll", BsonString(namespace.collectionName))
+        )
         assertEquals(
                 docFilter[CoreDocumentSynchronizationConfig.ConfigCodec.Fields.DOCUMENT_ID_FIELD],
                 id)
@@ -99,8 +102,10 @@ class CoreDocumentSynchronizationConfigUnitTests {
         assertEquals(expectedTestVersion,
             doc[CoreDocumentSynchronizationConfig.ConfigCodec.Fields.LAST_KNOWN_REMOTE_VERSION_FIELD])
         assertEquals(
-            BsonString("${namespace.databaseName}.${namespace.collectionName}"),
-                doc[CoreDocumentSynchronizationConfig.ConfigCodec.Fields.NAMESPACE_FIELD])
+            BsonDocument()
+                .append("db", BsonString(namespace.databaseName))
+                .append("coll", BsonString(namespace.collectionName)),
+            doc[CoreDocumentSynchronizationConfig.ConfigCodec.Fields.NAMESPACE_FIELD])
         assertNotNull(doc[CoreDocumentSynchronizationConfig.ConfigCodec.Fields.LAST_UNCOMMITTED_CHANGE_EVENT])
 
         config = CoreDocumentSynchronizationConfig.fromBsonDocument(doc)

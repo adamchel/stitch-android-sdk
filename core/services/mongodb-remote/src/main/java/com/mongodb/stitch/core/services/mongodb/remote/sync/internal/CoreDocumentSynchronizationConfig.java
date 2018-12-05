@@ -106,12 +106,29 @@ class CoreDocumentSynchronizationConfig {
     this.isPaused = isPaused;
   }
 
+  static BsonDocument getNamespaceForStorage(@Nonnull final MongoNamespace namespace) {
+    return new BsonDocument()
+        .append(
+            ConfigCodec.Fields.NAMESPACE_DB_FIELD,
+            new BsonString(namespace.getDatabaseName()))
+        .append(
+            ConfigCodec.Fields.NAMESPACE_COLL_FIELD,
+            new BsonString(namespace.getCollectionName()));
+  }
+
+  static MongoNamespace getNamespaceFromStorage(@Nonnull final BsonDocument namespaceDoc) {
+    return new MongoNamespace(
+        namespaceDoc.getString(ConfigCodec.Fields.NAMESPACE_DB_FIELD).getValue(),
+        namespaceDoc.getString(ConfigCodec.Fields.NAMESPACE_COLL_FIELD).getValue()
+    );
+  }
+
   static BsonDocument getDocFilter(
       @Nonnull final MongoNamespace namespace,
       @Nonnull final BsonValue documentId
   ) {
     final BsonDocument filter = new BsonDocument();
-    filter.put(ConfigCodec.Fields.NAMESPACE_FIELD, new BsonString(namespace.toString()));
+    filter.put(ConfigCodec.Fields.NAMESPACE_FIELD, getNamespaceForStorage(namespace));
     filter.put(ConfigCodec.Fields.DOCUMENT_ID_FIELD, documentId);
     return filter;
   }
@@ -414,8 +431,8 @@ class CoreDocumentSynchronizationConfig {
     try {
       final BsonDocument asDoc = new BsonDocument();
       asDoc.put(ConfigCodec.Fields.DOCUMENT_ID_FIELD, getDocumentId());
-      asDoc.put(ConfigCodec.Fields.SCHEMA_VERSION_FIELD, new BsonInt32(1));
-      asDoc.put(ConfigCodec.Fields.NAMESPACE_FIELD, new BsonString(getNamespace().toString()));
+      asDoc.put(ConfigCodec.Fields.SCHEMA_VERSION_FIELD, new BsonInt32(2));
+      asDoc.put(ConfigCodec.Fields.NAMESPACE_FIELD, getNamespaceForStorage(namespace));
       asDoc.put(ConfigCodec.Fields.LAST_RESOLUTION_FIELD, new BsonInt64(getLastResolution()));
       if (getLastKnownRemoteVersion() != null) {
         asDoc.put(ConfigCodec.Fields.LAST_KNOWN_REMOTE_VERSION_FIELD, getLastKnownRemoteVersion());
@@ -447,7 +464,7 @@ class CoreDocumentSynchronizationConfig {
 
     final int schemaVersion =
         document.getNumber(ConfigCodec.Fields.SCHEMA_VERSION_FIELD).intValue();
-    if (schemaVersion != 1) {
+    if (schemaVersion != 2) {
       throw new IllegalStateException(
           String.format(
               "unexpected schema version '%d' for %s",
@@ -455,8 +472,10 @@ class CoreDocumentSynchronizationConfig {
               CoreDocumentSynchronizationConfig.class.getSimpleName()));
     }
 
-    final MongoNamespace namespace =
-        new MongoNamespace(document.getString(ConfigCodec.Fields.NAMESPACE_FIELD).getValue());
+    final MongoNamespace namespace;
+
+    final BsonDocument namespaceDoc = document.getDocument(ConfigCodec.Fields.NAMESPACE_FIELD);
+    namespace = getNamespaceFromStorage(namespaceDoc);
 
     final BsonDocument lastVersion;
     if (document.containsKey(ConfigCodec.Fields.LAST_KNOWN_REMOTE_VERSION_FIELD)) {
@@ -517,6 +536,8 @@ class CoreDocumentSynchronizationConfig {
       static final String DOCUMENT_ID_FIELD = "document_id";
       static final String SCHEMA_VERSION_FIELD = "schema_version";
       static final String NAMESPACE_FIELD = "namespace";
+      static final String NAMESPACE_DB_FIELD = "db";
+      static final String NAMESPACE_COLL_FIELD = "coll";
       static final String LAST_RESOLUTION_FIELD = "last_resolution";
       static final String LAST_KNOWN_REMOTE_VERSION_FIELD = "last_known_remote_version";
       static final String LAST_UNCOMMITTED_CHANGE_EVENT = "last_uncommitted_change_event";
